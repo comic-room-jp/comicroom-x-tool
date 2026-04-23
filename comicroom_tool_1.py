@@ -160,6 +160,8 @@ def parse_schedule_from_sheet(worksheet):
             while col < len(data_row) - 1:
                 platform = data_row[col].strip() if col < len(data_row) else ""
                 content  = data_row[col+1].strip() if col+1 < len(data_row) else ""
+                # 列の順番が逆：偶数列=作品名、奇数列=プラットフォーム
+                platform, content = content, platform
                 if platform and content:
                     day = dates_in_week.get(col)
                     if day is None:
