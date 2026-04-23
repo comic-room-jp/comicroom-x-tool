@@ -131,81 +131,58 @@ def get_google_creds():
 
 
 def parse_schedule_from_sheet(worksheet):
-    """
-    カレンダー形式のシートから投稿スケジュールを読み取る。
-    構造：
-      行3: 曜日ヘッダー（日・月・火・水・木・金・土）
-      行4以降: 各週のデータ
-        - 奇数行: 日付（数字）+ プラットフォーム名
-        - 偶数行: 作品名・話数
-    """
     all_values = worksheet.get_all_values()
     schedules = []
-
-    # 年月を取得（行2: D列=月, I列=年）
     try:
-        month = int(all_values[1][3])  # D2
-        year  = int(all_values[1][8])  # I2
+        month = int(all_values[1][3])
+        year  = int(all_values[1][8])
     except (IndexError, ValueError):
         today = date.today()
         month, year = today.month, today.year
-
-    # 列マッピング（B〜N列 = 0始まりで1〜13列目）
-    # カレンダーの列構成: B=日, D=月, F=火, H=水, J=木, L=金, N=土
-    day_cols = {
-        "日": 1, "月": 3, "火": 5, "水": 7, "木": 9, "金": 11, "土": 13
-    }
-
-    # 行4以降を週ごとに処理（2行セットで1週）
-    row = 3  # 0始まりで4行目
-    while row < len(all_values) - 1:
-        date_row    = all_values[row]      # 日付・プラットフォーム行
-        content_row = all_values[row + 1]  # 作品名・話数行
-
-        for weekday, col in day_cols.items():
-            try:
-                # 日付取得
-                day_str = date_row[col].strip() if col < len(date_row) else ""
-                if not day_str or not day_str.isdigit():
-                    continue
-                day = int(day_str)
-
-                # プラットフォーム取得（日付の左隣の列）
-                platform = date_row[col - 1].strip() if col > 0 else ""
-
-                # 作品名・話数取得
-                content = content_row[col].strip() if col < len(content_row) else ""
-                if not content:
-                    continue
-
-                # 日付オブジェクト作成
-                try:
-                    post_date = date(year, month, day)
-                except ValueError:
-                    continue
-
-                # 作品名と話数を分離（例: "能ある夫人87話" → 作品名 + 話数）
-                match = re.search(r'(\d+話)', content)
-                if match:
-                    episode = match.group(1)
-                    title   = content[:match.start()].strip()
-                else:
-                    episode = ""
-                    title   = content
-
-                schedules.append({
-                    "date":     post_date,
-                    "weekday":  weekday,
-                    "platform": platform,
-                    "title":    title,
-                    "episode":  episode,
-                    "content":  content,
-                })
-            except (IndexError, ValueError):
-                continue
-
-        row += 9  # 次の週へ（週ごとに約9行）
-
+    date_cols = [1, 3, 5, 7, 9, 11, 13]
+    date_row_idx = 3
+    while date_row_idx < len(all_values):
+        date_row = all_values[date_row_idx]
+        has_date = any(col < len(date_row) and date_row[col].strip().isdigit() for col in date_cols)
+        if not has_date:
+            date_row_idx += 1
+            continue
+        dates_in_week = {}
+        for col in date_cols:
+            if col < len(date_row) and date_row[col].strip().isdigit():
+                dates_in_week[col] = int(date_row[col].strip())
+        for data_offset in range(1, 9):
+            data_row_idx = date_row_idx + data_offset
+            if data_row_idx >= len(all_values):
+                break
+            data_row = all_values[data_row_idx]
+            col = 0
+            while col < len(data_row) - 1:
+                platform = data_row[col].strip() if col < len(data_row) else ""
+                content  = data_row[col+1].strip() if col+1 < len(data_row) else ""
+                if platform and content:
+                    day = dates_in_week.get(col)
+                    if day is None:
+                        for dc in sorted(dates_in_week.keys()):
+                            if dc >= col:
+                                day = dates_in_week[dc]
+                                break
+                    if day:
+                        try:
+                            post_date = date(year, month, day)
+                        except ValueError:
+                            col += 2
+                            continue
+                        num = re.search("[0-9]+話", content)
+                        if num:
+                            episode = num.group(0)
+                            title   = content[:num.start()].strip()
+                        else:
+                            episode = ""
+                            title   = content
+                        schedules.append({"date": post_date, "weekday": "", "platform": platform, "title": title, "episode": episode, "content": content})
+                col += 2
+        date_row_idx += 9
     return sorted(schedules, key=lambda x: x["date"])
 
 
