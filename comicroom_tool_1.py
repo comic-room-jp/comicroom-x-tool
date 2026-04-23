@@ -30,7 +30,7 @@ except ImportError:
 #  設定
 # ─────────────────────────────────────────────
 SPREADSHEET_ID = "1_NK6cUMxr3piu7UcCx6LCdUq7DwEacJpsdzZHTAJmxs"
-SHEET_NAME     = "直取"
+SHEET_NAME     = "自動配信カレンダー"
 
 # ─────────────────────────────────────────────
 #  ページ設定
