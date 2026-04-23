@@ -411,7 +411,8 @@ with tab1:
         st.error(f"スプレッドシートの読み込みに失敗しました：{error}")
         st.info("💡 JSONファイルが comicroom_tool フォルダに入っているか確認してください。")
     elif not schedules:
-        st.warning("スケジュールが見つかりませんでした。")
+        st.warning(f"スケジュールが見つかりませんでした。データ件数: {len(schedules) if schedules else 0}")
+        st.info(f"シート名: {SHEET_NAME}")
     else:
         today = date.today()
 
