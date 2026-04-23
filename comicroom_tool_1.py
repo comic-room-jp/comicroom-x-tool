@@ -444,7 +444,7 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                 with col2:
-                    if st.button("この作品で投稿文を作る", key=f"sel_{idx}"):
+                    if st.button("この作品で投稿文を作る", key=f"sel_{schedules.index(s)}"):
                         selected = s
 
             if selected:
