@@ -444,7 +444,7 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                 with col2:
-                    if st.button("この作品で投稿文を作る", key=f"sel_{s['date']}_{s['title']}"):
+                    if st.button("この作品で投稿文を作る", key=f"sel_{s['date']}_{s['platform']}_{s['title'][:10]}_{i}"):
                         selected = s
 
             if selected:
