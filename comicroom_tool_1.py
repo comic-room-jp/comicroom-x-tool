@@ -416,7 +416,7 @@ with tab1:
         today = date.today()
 
         # 今日・今後7日分を表示
-        upcoming = [s for s in schedules if s["date"] >= today][:14]
+        upcoming = [s for s in schedules][:14]
 
         if not upcoming:
             st.info("今後の投稿予定はありません。")
