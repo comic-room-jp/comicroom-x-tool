@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-comicroom_tool.py
-=================
+comicroom_tool_1.py
+===================
 COMIC ROOM X投稿ジェネレーター（統合版）
-実行方法: streamlit run comicroom_tool.py
+実行方法: streamlit run comicroom_tool_1.py
 """
 
 import os
@@ -15,8 +15,22 @@ import anthropic
 import streamlit as st
 from PIL import Image
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
+
+# Google Sheets
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
+# ─────────────────────────────────────────────
+#  設定
+# ─────────────────────────────────────────────
+SPREADSHEET_ID = "1_NK6cUMxr3piu7UcCx6LCdUq7DwEacJpsdzZHTAJmxs"
+SHEET_NAME     = "直取"
 
 # ─────────────────────────────────────────────
 #  ページ設定
@@ -27,30 +41,24 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─────────────────────────────────────────────
-#  スタイル
-# ─────────────────────────────────────────────
 st.markdown("""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
   html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
   .main { background: #f7f6f2; }
   .block-container { padding-top: 2rem; max-width: 1100px; }
-
   .cr-header {
     background: #1a1a1a; color: white;
     padding: 20px 28px; border-radius: 8px;
     margin-bottom: 24px;
-    display: flex; align-items: center; gap: 16px;
   }
   .cr-title { font-size: 22px; font-weight: 900; letter-spacing: 2px; }
   .cr-sub   { font-size: 12px; color: #888; margin-top: 4px; letter-spacing: 1px; }
   .cr-badge {
-    margin-left: auto; background: #e8003d;
+    display: inline-block; background: #e8003d;
     color: white; font-size: 10px; font-weight: 700;
-    letter-spacing: 2px; padding: 4px 10px; border-radius: 3px;
+    letter-spacing: 2px; padding: 4px 10px; border-radius: 3px; margin-top: 8px;
   }
-
   .post-card {
     background: white; border: 1px solid #e2e0d8;
     border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;
@@ -64,29 +72,21 @@ st.markdown("""
   .post-text { font-size: 14px; line-height: 1.9; white-space: pre-wrap; }
   .char-count { text-align: right; font-size: 11px; color: #bbb; margin-top: 8px; }
   .char-over  { color: #e8003d; font-weight: 700; }
-
-  .section-head {
-    font-size: 11px; font-weight: 700; letter-spacing: 3px;
-    color: #999; text-transform: uppercase; margin-bottom: 8px;
+  .schedule-card {
+    background: white; border: 1px solid #e2e0d8; border-radius: 8px;
+    padding: 14px 18px; margin-bottom: 8px; cursor: pointer;
   }
-  .result-img {
-    border-radius: 6px; width: 100%;
-    border: 1px solid #e2e0d8;
-  }
-  .info-box {
-    background: #eef6ff; border-left: 3px solid #0984e3;
-    border-radius: 4px; padding: 10px 14px;
-    font-size: 13px; color: #444; margin: 8px 0;
-  }
-  .warn-box {
-    background: #fff5f0; border-left: 3px solid #e17055;
-    border-radius: 4px; padding: 10px 14px;
-    font-size: 13px; color: #444; margin: 8px 0;
+  .schedule-card:hover { border-color: #e8003d; background: #fff5f5; }
+  .schedule-title { font-weight: 700; font-size: 15px; color: #1a1a1a; }
+  .schedule-meta  { font-size: 12px; color: #888; margin-top: 4px; }
+  .today-badge {
+    display: inline-block; background: #e8003d; color: white;
+    font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 3px; margin-left: 8px;
   }
   div[data-testid="stButton"] button {
     background: #e8003d; color: white; border: none;
     font-weight: 700; letter-spacing: 1px; border-radius: 4px;
-    padding: 10px 24px; width: 100%;
   }
   div[data-testid="stButton"] button:hover { background: #ff4d6d; }
 </style>
@@ -97,16 +97,138 @@ st.markdown("""
 # ─────────────────────────────────────────────
 st.markdown("""
 <div class="cr-header">
-  <div>
-    <div class="cr-title">📚 COMIC ROOM</div>
-    <div class="cr-sub">X POST GENERATOR — マンガ公式投稿ツール</div>
-  </div>
+  <div class="cr-title">📚 COMIC ROOM</div>
+  <div class="cr-sub">X POST GENERATOR — マンガ公式投稿ツール</div>
   <div class="cr-badge">AI POWERED</div>
 </div>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  テンプレート定義（テンプレートベース）
+#  Google Sheets 読み取り
+# ─────────────────────────────────────────────
+def get_google_creds():
+    """Streamlit SecretsまたはJSONファイルから認証情報を取得"""
+    # Streamlit Cloud上の場合はSecretsから取得
+    if "gcp_service_account" in st.secrets:
+        return Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=[
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive",
+            ]
+        )
+    # ローカルの場合はJSONファイルから取得
+    json_files = list(Path(".").glob("*.json"))
+    if json_files:
+        return Credentials.from_service_account_file(
+            str(json_files[0]),
+            scopes=[
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive",
+            ]
+        )
+    return None
+
+
+def parse_schedule_from_sheet(worksheet):
+    """
+    カレンダー形式のシートから投稿スケジュールを読み取る。
+    構造：
+      行3: 曜日ヘッダー（日・月・火・水・木・金・土）
+      行4以降: 各週のデータ
+        - 奇数行: 日付（数字）+ プラットフォーム名
+        - 偶数行: 作品名・話数
+    """
+    all_values = worksheet.get_all_values()
+    schedules = []
+
+    # 年月を取得（行2: D列=月, I列=年）
+    try:
+        month = int(all_values[1][3])  # D2
+        year  = int(all_values[1][8])  # I2
+    except (IndexError, ValueError):
+        today = date.today()
+        month, year = today.month, today.year
+
+    # 列マッピング（B〜N列 = 0始まりで1〜13列目）
+    # カレンダーの列構成: B=日, D=月, F=火, H=水, J=木, L=金, N=土
+    day_cols = {
+        "日": 1, "月": 3, "火": 5, "水": 7, "木": 9, "金": 11, "土": 13
+    }
+
+    # 行4以降を週ごとに処理（2行セットで1週）
+    row = 3  # 0始まりで4行目
+    while row < len(all_values) - 1:
+        date_row    = all_values[row]      # 日付・プラットフォーム行
+        content_row = all_values[row + 1]  # 作品名・話数行
+
+        for weekday, col in day_cols.items():
+            try:
+                # 日付取得
+                day_str = date_row[col].strip() if col < len(date_row) else ""
+                if not day_str or not day_str.isdigit():
+                    continue
+                day = int(day_str)
+
+                # プラットフォーム取得（日付の左隣の列）
+                platform = date_row[col - 1].strip() if col > 0 else ""
+
+                # 作品名・話数取得
+                content = content_row[col].strip() if col < len(content_row) else ""
+                if not content:
+                    continue
+
+                # 日付オブジェクト作成
+                try:
+                    post_date = date(year, month, day)
+                except ValueError:
+                    continue
+
+                # 作品名と話数を分離（例: "能ある夫人87話" → 作品名 + 話数）
+                match = re.search(r'(\d+話)', content)
+                if match:
+                    episode = match.group(1)
+                    title   = content[:match.start()].strip()
+                else:
+                    episode = ""
+                    title   = content
+
+                schedules.append({
+                    "date":     post_date,
+                    "weekday":  weekday,
+                    "platform": platform,
+                    "title":    title,
+                    "episode":  episode,
+                    "content":  content,
+                })
+            except (IndexError, ValueError):
+                continue
+
+        row += 9  # 次の週へ（週ごとに約9行）
+
+    return sorted(schedules, key=lambda x: x["date"])
+
+
+@st.cache_data(ttl=300)
+def load_schedule():
+    """スプレッドシートからスケジュールを読み込む（5分キャッシュ）"""
+    if not GSPREAD_AVAILABLE:
+        return None, "gspread がインストールされていません"
+    creds = get_google_creds()
+    if not creds:
+        return None, "認証情報（JSONファイル）が見つかりません"
+    try:
+        gc        = gspread.authorize(creds)
+        sh        = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet(SHEET_NAME)
+        schedules = parse_schedule_from_sheet(worksheet)
+        return schedules, None
+    except Exception as e:
+        return None, str(e)
+
+
+# ─────────────────────────────────────────────
+#  テンプレート定義
 # ─────────────────────────────────────────────
 def tag(t): return re.sub(r'[\s　・『』【】「」()（）]', '', t)
 
@@ -144,7 +266,7 @@ TEMPLATE_PATTERNS = {
     "📚 新刊告知": [
         {
             "tone": "キャッチー・感情的",
-            "build": lambda t, g, vol, date, hook: f"""📚{(vol + ' ') if vol else ''}{(date + '発売！') if date else '発売！'}
+            "build": lambda t, g, vol, date_str, hook: f"""📚{(vol + ' ') if vol else ''}{(date_str + '発売！') if date_str else '発売！'}
 『{t}』
 
 {hook}
@@ -154,8 +276,8 @@ TEMPLATE_PATTERNS = {
         },
         {
             "tone": "情報・ストレート",
-            "build": lambda t, g, vol, date, hook: f"""【新刊情報】📚
-『{t}』{(vol) if vol else ''}{('　' + date + '発売') if date else ''}
+            "build": lambda t, g, vol, date_str, hook: f"""【新刊情報】📚
+『{t}』{(vol) if vol else ''}{('　' + date_str + '発売') if date_str else ''}
 
 {hook}
 
@@ -164,8 +286,8 @@ TEMPLATE_PATTERNS = {
         },
         {
             "tone": "共感・口コミ狙い",
-            "build": lambda t, g, vol, date, hook: f"""待っていた方、お待たせしました🎉
-『{t}』{(vol) if vol else ''}が{(date + 'に') if date else ''}発売！
+            "build": lambda t, g, vol, date_str, hook: f"""待っていた方、お待たせしました🎉
+『{t}』{(vol) if vol else ''}が{(date_str + 'に') if date_str else ''}発売！
 
 {hook}
 
@@ -269,82 +391,7 @@ TEMPLATE_PATTERNS = {
 }
 
 # ─────────────────────────────────────────────
-#  画像分析関数（AIモード）
-# ─────────────────────────────────────────────
-def analyze_images_with_ai(client, images_data, title, episode, genre):
-    """全画像をClaudeに送り、最もヒキになるシーンを特定する"""
-    content = []
-    for i, (name, b64, media_type) in enumerate(images_data):
-        content.append({"type": "text", "text": f"--- 画像{i+1}枚目: {name} ---"})
-        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}})
-
-    content.append({"type": "text", "text": f"""
-あなたはマンガ編集者です。
-上記は「{title}」{episode}の画像（計{len(images_data)}枚）です。
-ジャンル：{genre or 'マンガ'}
-
-X（旧Twitter）に投稿したときに「続きが読みたい！」と読者が最も感じる"ヒキ"の強いシーンを1枚選んでください。
-
-選んだ理由・シーン要約・煽り文句・投稿文3パターンを以下のJSONのみで返してください。前置き不要。
-{{
-  "index": <選んだ画像の番号（1始まり）>,
-  "reason": "<選んだ理由（50字以内）>",
-  "scene_summary": "<そのシーンで何が起きているかの要約（80字以内）>",
-  "hook_phrase": "<煽り文句（30字以内）>",
-  "posts": [
-    {{"tone": "感情・没入系",       "text": "<140字以内の投稿文。#コミックルーム と #{title.replace('　','').replace(' ','')} を含める>"}},
-    {{"tone": "問いかけ・巻き込み系", "text": "<140字以内の投稿文>"}},
-    {{"tone": "煽り・次回引き系",   "text": "<140字以内の投稿文>"}}
-  ]
-}}
-"""})
-
-    response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": content}]
-    )
-    raw = re.sub(r"```(?:json)?", "", response.content[0].text).strip().strip("`")
-    return json.loads(raw)
-
-
-def crop_image(pil_img):
-    """4:3にセンタークロップ（上部30%基点）"""
-    w, h = pil_img.size
-    target_ratio = 4 / 3
-    if w / h > target_ratio:
-        new_w = int(h * target_ratio)
-        left = (w - new_w) // 2
-        return pil_img.crop((left, 0, left + new_w, h))
-    else:
-        new_h = int(w / target_ratio)
-        top = int((h - new_h) * 0.3)
-        return pil_img.crop((0, top, w, top + new_h))
-
-
-def render_posts(posts):
-    """投稿文カードを表示＋コピーボタン"""
-    for i, p in enumerate(posts):
-        text = p["text"].strip()
-        count = len(text)
-        over = count > 140
-        count_html = f'<div class="char-count {"char-over" if over else ""}">{count}字{"　⚠ やや長め" if over else ""}</div>'
-
-        st.markdown(f"""
-        <div class="post-card">
-          <div class="post-card-header">
-            <span class="pattern-num">PATTERN {i+1}</span>
-            <span class="pattern-tone">{p['tone']}</span>
-          </div>
-          <div class="post-text">{text}</div>
-          {count_html}
-        </div>
-        """, unsafe_allow_html=True)
-        st.code(text, language=None)
-
-
-# ─────────────────────────────────────────────
-#  サイドバー：共通入力
+#  サイドバー
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🔑 APIキー設定")
@@ -352,14 +399,12 @@ with st.sidebar:
         "Anthropic APIキー",
         type="password",
         placeholder="sk-ant-api03-...",
-        help="最新話更新（AI画像分析）モードで必要です。他のテンプレートは不要。"
     )
     api_key = api_key_input or os.environ.get("ANTHROPIC_API_KEY", "")
-
     if api_key:
         st.success("✅ APIキー設定済み")
     else:
-        st.info("💡 最新話更新（AIモード）を使う場合は入力してください")
+        st.info("💡 AIモードで必要です")
 
     st.divider()
     st.markdown("### 📋 作品基本情報")
@@ -367,278 +412,322 @@ with st.sidebar:
     genre = st.text_input("ジャンル", placeholder="例：少女ファンタジー")
 
 # ─────────────────────────────────────────────
-#  メイン：テンプレート選択
+#  タブ構成
 # ─────────────────────────────────────────────
-template = st.radio(
-    "テンプレートを選択",
-    list(TEMPLATE_PATTERNS.keys()),
-    horizontal=True,
-    label_visibility="collapsed",
-)
-
-st.divider()
+tab1, tab2 = st.tabs(["📅 スケジュールから投稿", "✏️ 手動で投稿作成"])
 
 # ─────────────────────────────────────────────
-#  テンプレート別フォーム
+#  TAB1: スプレッドシートから自動読み込み
 # ─────────────────────────────────────────────
+with tab1:
+    st.markdown("### 📅 投稿スケジュール")
+    st.caption("スプレッドシートから本日・直近の投稿予定を自動取得します")
 
-# ── 最新話更新 ──────────────────────────────
-if template == "📖 最新話更新":
-    col1, col2 = st.columns([1, 1])
+    col_refresh, col_date = st.columns([1, 2])
+    with col_refresh:
+        if st.button("🔄 スケジュールを更新", use_container_width=True):
+            st.cache_data.clear()
 
-    with col1:
-        st.markdown('<div class="section-head">エピソード情報</div>', unsafe_allow_html=True)
-        episode  = st.text_input("話数", placeholder="例：第12話")
-        platform = st.text_input("掲載プラットフォーム", placeholder="例：マンガPark・LINEマンガ")
+    schedules, error = load_schedule()
 
-        st.markdown("**モードを選択**")
-        mode = st.radio("", ["🤖 AI画像分析モード（おすすめ）", "✏️ 手入力モード"], label_visibility="collapsed")
+    if error:
+        st.error(f"スプレッドシートの読み込みに失敗しました：{error}")
+        st.info("💡 JSONファイルが comicroom_tool フォルダに入っているか確認してください。")
+    elif not schedules:
+        st.warning("スケジュールが見つかりませんでした。")
+    else:
+        today = date.today()
 
-        if mode == "✏️ 手入力モード":
-            hook = st.text_area("この話で起きること・見どころ", height=80,
-                placeholder="例：ゼノがフラムをかばって傷を負う。初めて「守りたい」と口にする瞬間。")
-            cliff = st.text_area("引き・次回への期待（任意）", height=60,
-                placeholder="例：でも、その言葉の続きは——まだ、誰も知らない。")
+        # 今日・今後7日分を表示
+        upcoming = [s for s in schedules if s["date"] >= today][:14]
 
-    with col2:
-        st.markdown('<div class="section-head">投稿画像</div>', unsafe_allow_html=True)
-
-        if mode == "🤖 AI画像分析モード（おすすめ）":
-            uploaded_files = st.file_uploader(
-                "マンガページ画像をアップロード（複数選択可・約12枚）",
-                type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True,
-                help="ファイルを選択してCtrl+A（またはCmd+A）で全選択できます"
-            )
-            if uploaded_files:
-                st.success(f"✅ {len(uploaded_files)}枚読み込み済み")
-                # サムネイル表示（最初の3枚）
-                thumb_cols = st.columns(min(3, len(uploaded_files)))
-                for i, f in enumerate(uploaded_files[:3]):
-                    with thumb_cols[i]:
-                        st.image(f, use_container_width=True)
+        if not upcoming:
+            st.info("今後の投稿予定はありません。")
         else:
-            uploaded_img = st.file_uploader("投稿用画像（1枚）", type=["jpg","jpeg","png","webp"])
-            if uploaded_img:
-                st.image(uploaded_img, use_container_width=True)
+            st.markdown(f"**{len(upcoming)}件** の投稿予定が見つかりました")
 
-    st.markdown("")
-    generate = st.button("✦ 投稿文を生成する", use_container_width=True)
+            selected = None
+            for s in upcoming:
+                is_today = s["date"] == today
+                today_badge = '<span class="today-badge">TODAY</span>' if is_today else ""
+                date_str = s["date"].strftime("%m/%d（" + s["weekday"] + "）")
 
-    if generate:
-        if not title:
-            st.error("作品名を入力してください。")
-        elif mode == "🤖 AI画像分析モード（おすすめ）":
-            if not api_key:
-                st.error("AIモードにはAPIキーが必要です。サイドバーに入力してください。")
-            elif not uploaded_files:
-                st.error("画像をアップロードしてください。")
-            else:
-                with st.spinner("🔍 Claudeが画像を分析中...（少々お待ちください）"):
-                    try:
-                        client = anthropic.Anthropic(api_key=api_key)
-                        images_data = []
-                        for f in sorted(uploaded_files, key=lambda x: x.name):
-                            b64 = base64.standard_b64encode(f.read()).decode()
-                            ext = f.name.split(".")[-1].lower()
-                            mt  = "image/jpeg" if ext in ["jpg","jpeg"] else f"image/{ext}"
-                            images_data.append((f.name, b64, mt))
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"""
+                    <div class="schedule-card">
+                      <div class="schedule-title">
+                        {s['title']}　{s['episode']}{today_badge}
+                      </div>
+                      <div class="schedule-meta">
+                        📅 {date_str}　📱 {s['platform']}
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    if st.button("この作品で投稿文を作る", key=f"sel_{s['date']}_{s['title']}"):
+                        selected = s
 
-                        result = analyze_images_with_ai(client, images_data, title, episode, genre)
-                        idx = max(0, min(int(result["index"]) - 1, len(uploaded_files) - 1))
-
-                        st.divider()
-                        st.markdown("### 📋 生成結果")
-
-                        r1, r2 = st.columns([1, 2])
-                        with r1:
-                            st.markdown('<div class="section-head">選ばれた画像</div>', unsafe_allow_html=True)
-                            uploaded_files[idx].seek(0)
-                            pil = Image.open(uploaded_files[idx])
-                            cropped = crop_image(pil)
-                            st.image(cropped, caption=f"{uploaded_files[idx].name}（4:3クロップ済み）", use_container_width=True)
-
-                            # 保存ボタン
-                            buf = BytesIO()
-                            cropped.convert("RGB").save(buf, "JPEG", quality=85)
-                            st.download_button(
-                                "💾 画像をダウンロード",
-                                data=buf.getvalue(),
-                                file_name=f"{tag(title)}_{episode}_x_post.jpg",
-                                mime="image/jpeg",
-                                use_container_width=True,
-                            )
-
-                            st.markdown(f"""
-                            <div class="info-box">
-                            📝 <strong>シーン</strong>：{result['scene_summary']}<br>
-                            💥 <strong>煽り文句</strong>：{result['hook_phrase']}<br>
-                            💬 <strong>選んだ理由</strong>：{result['reason']}
-                            </div>
-                            """, unsafe_allow_html=True)
-
-                        with r2:
-                            st.markdown('<div class="section-head">投稿文 3パターン</div>', unsafe_allow_html=True)
-                            render_posts(result["posts"])
-
-                    except Exception as e:
-                        st.error(f"エラーが発生しました：{e}")
-
-        else:  # 手入力モード
-            if not hook:
-                st.error("この話で起きること・見どころを入力してください。")
-            else:
-                posts = []
-                for p in TEMPLATE_PATTERNS[template]:
-                    text = p["build"](title, genre, episode, hook, cliff if 'cliff' in dir() else "", platform)
-                    posts.append({"tone": p["tone"], "text": text.strip()})
-
+            if selected:
                 st.divider()
-                st.markdown("### 📋 生成結果")
-                col_img, col_txt = st.columns([1, 2])
-                with col_img:
-                    if 'uploaded_img' in dir() and uploaded_img:
-                        pil = Image.open(uploaded_img)
-                        cropped = crop_image(pil)
-                        st.image(cropped, caption="投稿用画像（4:3クロップ）", use_container_width=True)
-                        buf = BytesIO()
-                        cropped.convert("RGB").save(buf, "JPEG", quality=85)
-                        st.download_button("💾 画像をダウンロード", buf.getvalue(),
-                            file_name=f"{tag(title)}_{episode}_x_post.jpg", mime="image/jpeg", use_container_width=True)
-                with col_txt:
-                    render_posts(posts)
+                st.markdown(f"### ✍️ 「{selected['title']}」の投稿文を生成")
 
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    ep_input   = st.text_input("話数", value=selected["episode"])
+                    plt_input  = st.text_input("プラットフォーム", value=selected["platform"])
+                    hook_input = st.text_area("この話の見どころ・引き *", height=80,
+                        placeholder="例：ゼノがフラムをかばって傷を負う。初めて「守りたい」と口にする瞬間。")
+                    cliff_input = st.text_area("引き・次回への期待（任意）", height=60,
+                        placeholder="例：でも、その言葉の続きは——まだ、誰も知らない。")
+                with c2:
+                    st.markdown("**投稿画像**")
+                    mode = st.radio("モード", ["🤖 AI画像分析", "📁 画像を1枚選ぶ"], label_visibility="collapsed")
 
-# ── 新刊告知 ────────────────────────────────
-elif template == "📚 新刊告知":
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        vol  = st.text_input("発売巻数", placeholder="例：第3巻")
-        date = st.text_input("発売日",  placeholder="例：4月25日（木）")
-        hook = st.text_area("この巻の見どころ・引き *", height=90,
-            placeholder="例：ゼノとフラムがついに二人きりに。秘密が明かされる衝撃の展開。")
-    with c2:
-        img = st.file_uploader("投稿用画像（任意）", type=["jpg","jpeg","png","webp"])
-        if img: st.image(img, use_container_width=True)
+                    if mode == "🤖 AI画像分析":
+                        uploaded_files = st.file_uploader(
+                            "マンガページ画像（複数）",
+                            type=["jpg","jpeg","png","webp"],
+                            accept_multiple_files=True
+                        )
+                        if uploaded_files:
+                            st.success(f"✅ {len(uploaded_files)}枚読み込み済み")
+                    else:
+                        uploaded_img = st.file_uploader("投稿用画像（1枚）", type=["jpg","jpeg","png","webp"])
+                        if uploaded_img:
+                            st.image(uploaded_img, use_container_width=True)
 
-    if st.button("✦ 投稿文を生成する", use_container_width=True):
-        if not title or not hook:
-            st.error("作品名とこの巻の見どころを入力してください。")
-        else:
-            posts = [{"tone": p["tone"], "text": p["build"](title, genre, vol, date, hook).strip()}
-                     for p in TEMPLATE_PATTERNS[template]]
-            st.divider()
-            st.markdown("### 📋 生成結果")
-            c_img, c_txt = st.columns([1, 2])
-            with c_img:
-                if img:
-                    pil = crop_image(Image.open(img))
-                    st.image(pil, use_container_width=True)
-                    buf = BytesIO(); pil.convert("RGB").save(buf,"JPEG",quality=85)
-                    st.download_button("💾 画像をダウンロード", buf.getvalue(),
-                        file_name=f"{tag(title)}_x_post.jpg", mime="image/jpeg", use_container_width=True)
-            with c_txt:
-                render_posts(posts)
+                if st.button("✦ 投稿文を生成する", use_container_width=True):
+                    title_val = selected["title"]
+                    genre_val = genre or ""
 
+                    if mode == "🤖 AI画像分析":
+                        if not api_key:
+                            st.error("AIモードにはAPIキーが必要です。")
+                        elif not uploaded_files:
+                            st.error("画像をアップロードしてください。")
+                        else:
+                            with st.spinner("🔍 Claudeが画像を分析中..."):
+                                try:
+                                    client = anthropic.Anthropic(api_key=api_key)
+                                    content = []
+                                    for f in sorted(uploaded_files, key=lambda x: x.name):
+                                        b64 = base64.standard_b64encode(f.read()).decode()
+                                        ext = f.name.split(".")[-1].lower()
+                                        mt  = "image/jpeg" if ext in ["jpg","jpeg"] else f"image/{ext}"
+                                        content.append({"type":"text","text":f"--- {f.name} ---"})
+                                        content.append({"type":"image","source":{"type":"base64","media_type":mt,"data":b64}})
 
-# ── 重版報告 ────────────────────────────────
-elif template == "🔁 重版報告":
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        info = st.text_input("重版情報", placeholder="例：第5刷決定 / 累計10万部突破")
-        hook = st.text_area("読者へのメッセージ・一言 *", height=90,
-            placeholder="例：「続きが気になって眠れない」という声が何より励みです。")
-    with c2:
-        img = st.file_uploader("投稿用画像（任意）", type=["jpg","jpeg","png","webp"])
-        if img: st.image(img, use_container_width=True)
+                                    content.append({"type":"text","text":f"""
+あなたはマンガ編集者です。「{title_val}」{ep_input}の画像（{len(uploaded_files)}枚）を見て、
+X投稿で「続きが読みたい！」と最も感じるヒキの強いシーンを1枚選び、
+投稿文3パターンをJSONで返してください。前置き不要。
+{{"index":<1始まり>,"reason":"<50字>","scene_summary":"<80字>","hook_phrase":"<30字>",
+"posts":[
+  {{"tone":"感情・没入系","text":"<140字以内 #コミックルーム #{tag(title_val)} 含む>"}},
+  {{"tone":"問いかけ・巻き込み系","text":"<140字以内>"}},
+  {{"tone":"煽り・次回引き系","text":"<140字以内>"}}
+]}}"""})
+                                    resp = client.messages.create(
+                                        model="claude-opus-4-5", max_tokens=1500,
+                                        messages=[{"role":"user","content":content}]
+                                    )
+                                    raw    = re.sub(r"```(?:json)?","",resp.content[0].text).strip().strip("`")
+                                    result = json.loads(raw)
+                                    idx    = max(0, min(int(result["index"])-1, len(uploaded_files)-1))
 
-    if st.button("✦ 投稿文を生成する", use_container_width=True):
-        if not title or not hook:
-            st.error("作品名とメッセージを入力してください。")
-        else:
-            posts = [{"tone": p["tone"], "text": p["build"](title, genre, info, hook).strip()}
-                     for p in TEMPLATE_PATTERNS[template]]
-            st.divider()
-            st.markdown("### 📋 生成結果")
-            c_img, c_txt = st.columns([1, 2])
-            with c_img:
-                if img:
-                    pil = crop_image(Image.open(img))
-                    st.image(pil, use_container_width=True)
-                    buf = BytesIO(); pil.convert("RGB").save(buf,"JPEG",quality=85)
-                    st.download_button("💾 画像をダウンロード", buf.getvalue(),
-                        file_name=f"{tag(title)}_x_post.jpg", mime="image/jpeg", use_container_width=True)
-            with c_txt:
-                render_posts(posts)
+                                    st.divider()
+                                    r1, r2 = st.columns([1,2])
+                                    with r1:
+                                        uploaded_files[idx].seek(0)
+                                        pil = Image.open(uploaded_files[idx])
+                                        w, h = pil.size
+                                        new_h = int(w / (4/3))
+                                        top   = int((h - new_h) * 0.3) if h > new_h else 0
+                                        cropped = pil.crop((0, top, w, min(top+new_h, h)))
+                                        st.image(cropped, caption="選ばれた画像（4:3）", use_container_width=True)
+                                        buf = BytesIO()
+                                        cropped.convert("RGB").save(buf,"JPEG",quality=85)
+                                        st.download_button("💾 画像をダウンロード", buf.getvalue(),
+                                            file_name=f"{tag(title_val)}_{ep_input}_x.jpg", mime="image/jpeg",
+                                            use_container_width=True)
+                                        st.info(f"📝 {result['scene_summary']}\n\n💥 {result['hook_phrase']}")
+                                    with r2:
+                                        for i, p in enumerate(result["posts"]):
+                                            txt = p["text"].strip()
+                                            st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>', unsafe_allow_html=True)
+                                            st.code(txt, language=None)
+                                            st.caption(f"{len(txt)}字")
+                                except Exception as e:
+                                    st.error(f"エラー：{e}")
+                    else:
+                        if not hook_input:
+                            st.error("この話の見どころを入力してください。")
+                        else:
+                            posts = []
+                            for p in TEMPLATE_PATTERNS["📖 最新話更新"]:
+                                txt = p["build"](title_val, genre_val, ep_input, hook_input, cliff_input, plt_input).strip()
+                                posts.append({"tone": p["tone"], "text": txt})
 
-
-# ── TVアニメ化速報 ──────────────────────────
-elif template == "🎬 TVアニメ化速報":
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        info = st.text_input("放送時期・スタジオ（任意）", placeholder="例：2025年秋放送予定 / ○○アニメーション制作")
-        hook = st.text_area("一言コメント・読者へのメッセージ *", height=90,
-            placeholder="例：ずっとアニメ化を夢見ていました。応援してくれたみなさんのおかげです。")
-    with c2:
-        img = st.file_uploader("投稿用画像（任意）", type=["jpg","jpeg","png","webp"])
-        if img: st.image(img, use_container_width=True)
-
-    if st.button("✦ 投稿文を生成する", use_container_width=True):
-        if not title or not hook:
-            st.error("作品名とコメントを入力してください。")
-        else:
-            posts = [{"tone": p["tone"], "text": p["build"](title, genre, info, hook).strip()}
-                     for p in TEMPLATE_PATTERNS[template]]
-            st.divider()
-            st.markdown("### 📋 生成結果")
-            c_img, c_txt = st.columns([1, 2])
-            with c_img:
-                if img:
-                    pil = crop_image(Image.open(img))
-                    st.image(pil, use_container_width=True)
-                    buf = BytesIO(); pil.convert("RGB").save(buf,"JPEG",quality=85)
-                    st.download_button("💾 画像をダウンロード", buf.getvalue(),
-                        file_name=f"{tag(title)}_x_post.jpg", mime="image/jpeg", use_container_width=True)
-            with c_txt:
-                render_posts(posts)
-
-
-# ── note作品紹介 ────────────────────────────
-elif template == "✍️ note作品紹介":
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        note_title = st.text_input("note記事タイトル（任意）", placeholder="例：なぜ私がこの作品を作ったか")
-        hook = st.text_area("記事の内容・読んでほしいポイント *", height=90,
-            placeholder="例：制作秘話、キャラへの思い、読者へのメッセージを書きました。")
-    with c2:
-        img = st.file_uploader("投稿用画像（任意）", type=["jpg","jpeg","png","webp"])
-        if img: st.image(img, use_container_width=True)
-
-    if st.button("✦ 投稿文を生成する", use_container_width=True):
-        if not title or not hook:
-            st.error("作品名と記事の内容を入力してください。")
-        else:
-            posts = [{"tone": p["tone"], "text": p["build"](title, genre, note_title, hook).strip()}
-                     for p in TEMPLATE_PATTERNS[template]]
-            st.divider()
-            st.markdown("### 📋 生成結果")
-            c_img, c_txt = st.columns([1, 2])
-            with c_img:
-                if img:
-                    pil = crop_image(Image.open(img))
-                    st.image(pil, use_container_width=True)
-                    buf = BytesIO(); pil.convert("RGB").save(buf,"JPEG",quality=85)
-                    st.download_button("💾 画像をダウンロード", buf.getvalue(),
-                        file_name=f"{tag(title)}_x_post.jpg", mime="image/jpeg", use_container_width=True)
-            with c_txt:
-                render_posts(posts)
+                            st.divider()
+                            c_img, c_txt = st.columns([1,2])
+                            with c_img:
+                                if uploaded_img:
+                                    pil = Image.open(uploaded_img)
+                                    w, h = pil.size
+                                    new_h = int(w / (4/3))
+                                    top = int((h - new_h) * 0.3) if h > new_h else 0
+                                    cropped = pil.crop((0, top, w, min(top+new_h, h)))
+                                    st.image(cropped, use_container_width=True)
+                                    buf = BytesIO()
+                                    cropped.convert("RGB").save(buf,"JPEG",quality=85)
+                                    st.download_button("💾 画像をダウンロード", buf.getvalue(),
+                                        file_name=f"{tag(title_val)}_{ep_input}_x.jpg", mime="image/jpeg",
+                                        use_container_width=True)
+                            with c_txt:
+                                for i, p in enumerate(posts):
+                                    st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>', unsafe_allow_html=True)
+                                    st.code(p["text"], language=None)
+                                    st.caption(f"{len(p['text'])}字")
 
 # ─────────────────────────────────────────────
-#  フッター
+#  TAB2: 手動入力
 # ─────────────────────────────────────────────
+with tab2:
+    template = st.radio(
+        "テンプレート",
+        list(TEMPLATE_PATTERNS.keys()),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.divider()
+
+    if template == "📖 最新話更新":
+        c1, c2 = st.columns([1,1])
+        with c1:
+            episode  = st.text_input("話数", placeholder="例：第12話")
+            platform = st.text_input("掲載プラットフォーム", placeholder="例：マンガPark")
+            hook     = st.text_area("この話で起きること・見どころ *", height=80, placeholder="例：ゼノがフラムをかばって傷を負う。")
+            cliff    = st.text_area("引き・次回への期待（任意）", height=60, placeholder="例：でも、その言葉の続きは——")
+        with c2:
+            img = st.file_uploader("投稿用画像", type=["jpg","jpeg","png","webp"])
+            if img: st.image(img, use_container_width=True)
+
+        if st.button("✦ 投稿文を生成する", use_container_width=True, key="tab2_ep"):
+            if not title or not hook:
+                st.error("作品名とこの話の見どころを入力してください。")
+            else:
+                posts = [{"tone":p["tone"],"text":p["build"](title,genre,episode,hook,cliff,platform).strip()} for p in TEMPLATE_PATTERNS[template]]
+                st.divider()
+                c_i, c_t = st.columns([1,2])
+                with c_i:
+                    if img:
+                        pil = Image.open(img)
+                        w,h = pil.size; new_h=int(w/(4/3)); top=int((h-new_h)*0.3) if h>new_h else 0
+                        cr = pil.crop((0,top,w,min(top+new_h,h))); st.image(cr, use_container_width=True)
+                        buf=BytesIO(); cr.convert("RGB").save(buf,"JPEG",quality=85)
+                        st.download_button("💾 画像をダウンロード",buf.getvalue(),file_name=f"{tag(title)}_x.jpg",mime="image/jpeg",use_container_width=True)
+                with c_t:
+                    for i,p in enumerate(posts):
+                        st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>',unsafe_allow_html=True)
+                        st.code(p["text"],language=None); st.caption(f"{len(p['text'])}字")
+
+    elif template == "📚 新刊告知":
+        c1,c2=st.columns([1,1])
+        with c1:
+            vol=st.text_input("発売巻数",placeholder="例：第3巻"); date_s=st.text_input("発売日",placeholder="例：4月25日")
+            hook=st.text_area("この巻の見どころ *",height=90,placeholder="例：ゼノとフラムがついに二人きりに。")
+        with c2:
+            img=st.file_uploader("投稿用画像",type=["jpg","jpeg","png","webp"]); 
+            if img: st.image(img,use_container_width=True)
+        if st.button("✦ 投稿文を生成する",use_container_width=True,key="tab2_sk"):
+            if not title or not hook: st.error("作品名と見どころを入力してください。")
+            else:
+                posts=[{"tone":p["tone"],"text":p["build"](title,genre,vol,date_s,hook).strip()} for p in TEMPLATE_PATTERNS[template]]
+                st.divider(); c_i,c_t=st.columns([1,2])
+                with c_i:
+                    if img:
+                        pil=Image.open(img); w,h=pil.size; new_h=int(w/(4/3)); top=int((h-new_h)*0.3) if h>new_h else 0
+                        cr=pil.crop((0,top,w,min(top+new_h,h))); st.image(cr,use_container_width=True)
+                        buf=BytesIO(); cr.convert("RGB").save(buf,"JPEG",quality=85)
+                        st.download_button("💾 画像をダウンロード",buf.getvalue(),file_name=f"{tag(title)}_x.jpg",mime="image/jpeg",use_container_width=True)
+                with c_t:
+                    for i,p in enumerate(posts):
+                        st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>',unsafe_allow_html=True)
+                        st.code(p["text"],language=None); st.caption(f"{len(p['text'])}字")
+
+    elif template == "🔁 重版報告":
+        c1,c2=st.columns([1,1])
+        with c1:
+            info=st.text_input("重版情報",placeholder="例：第5刷決定 / 累計10万部突破")
+            hook=st.text_area("読者へのメッセージ *",height=90,placeholder="例：応援ありがとうございます！")
+        with c2:
+            img=st.file_uploader("投稿用画像",type=["jpg","jpeg","png","webp"])
+            if img: st.image(img,use_container_width=True)
+        if st.button("✦ 投稿文を生成する",use_container_width=True,key="tab2_jh"):
+            if not title or not hook: st.error("作品名とメッセージを入力してください。")
+            else:
+                posts=[{"tone":p["tone"],"text":p["build"](title,genre,info,hook).strip()} for p in TEMPLATE_PATTERNS[template]]
+                st.divider(); c_i,c_t=st.columns([1,2])
+                with c_i:
+                    if img:
+                        pil=Image.open(img); w,h=pil.size; new_h=int(w/(4/3)); top=int((h-new_h)*0.3) if h>new_h else 0
+                        cr=pil.crop((0,top,w,min(top+new_h,h))); st.image(cr,use_container_width=True)
+                        buf=BytesIO(); cr.convert("RGB").save(buf,"JPEG",quality=85)
+                        st.download_button("💾 画像をダウンロード",buf.getvalue(),file_name=f"{tag(title)}_x.jpg",mime="image/jpeg",use_container_width=True)
+                with c_t:
+                    for i,p in enumerate(posts):
+                        st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>',unsafe_allow_html=True)
+                        st.code(p["text"],language=None); st.caption(f"{len(p['text'])}字")
+
+    elif template == "🎬 TVアニメ化速報":
+        c1,c2=st.columns([1,1])
+        with c1:
+            info=st.text_input("放送時期・スタジオ",placeholder="例：2025年秋放送予定")
+            hook=st.text_area("コメント *",height=90,placeholder="例：ずっと夢見ていました。")
+        with c2:
+            img=st.file_uploader("投稿用画像",type=["jpg","jpeg","png","webp"])
+            if img: st.image(img,use_container_width=True)
+        if st.button("✦ 投稿文を生成する",use_container_width=True,key="tab2_an"):
+            if not title or not hook: st.error("作品名とコメントを入力してください。")
+            else:
+                posts=[{"tone":p["tone"],"text":p["build"](title,genre,info,hook).strip()} for p in TEMPLATE_PATTERNS[template]]
+                st.divider(); c_i,c_t=st.columns([1,2])
+                with c_i:
+                    if img:
+                        pil=Image.open(img); w,h=pil.size; new_h=int(w/(4/3)); top=int((h-new_h)*0.3) if h>new_h else 0
+                        cr=pil.crop((0,top,w,min(top+new_h,h))); st.image(cr,use_container_width=True)
+                        buf=BytesIO(); cr.convert("RGB").save(buf,"JPEG",quality=85)
+                        st.download_button("💾 画像をダウンロード",buf.getvalue(),file_name=f"{tag(title)}_x.jpg",mime="image/jpeg",use_container_width=True)
+                with c_t:
+                    for i,p in enumerate(posts):
+                        st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>',unsafe_allow_html=True)
+                        st.code(p["text"],language=None); st.caption(f"{len(p['text'])}字")
+
+    elif template == "✍️ note作品紹介":
+        c1,c2=st.columns([1,1])
+        with c1:
+            note_title=st.text_input("note記事タイトル",placeholder="例：なぜ私がこの作品を作ったか")
+            hook=st.text_area("記事の内容・ポイント *",height=90,placeholder="例：制作秘話、キャラへの思いを書きました。")
+        with c2:
+            img=st.file_uploader("投稿用画像",type=["jpg","jpeg","png","webp"])
+            if img: st.image(img,use_container_width=True)
+        if st.button("✦ 投稿文を生成する",use_container_width=True,key="tab2_nt"):
+            if not title or not hook: st.error("作品名と記事内容を入力してください。")
+            else:
+                posts=[{"tone":p["tone"],"text":p["build"](title,genre,note_title,hook).strip()} for p in TEMPLATE_PATTERNS[template]]
+                st.divider(); c_i,c_t=st.columns([1,2])
+                with c_i:
+                    if img:
+                        pil=Image.open(img); w,h=pil.size; new_h=int(w/(4/3)); top=int((h-new_h)*0.3) if h>new_h else 0
+                        cr=pil.crop((0,top,w,min(top+new_h,h))); st.image(cr,use_container_width=True)
+                        buf=BytesIO(); cr.convert("RGB").save(buf,"JPEG",quality=85)
+                        st.download_button("💾 画像をダウンロード",buf.getvalue(),file_name=f"{tag(title)}_x.jpg",mime="image/jpeg",use_container_width=True)
+                with c_t:
+                    for i,p in enumerate(posts):
+                        st.markdown(f'<div class="post-card"><div class="post-card-header"><span class="pattern-num">PATTERN {i+1}</span><span class="pattern-tone">{p["tone"]}</span></div></div>',unsafe_allow_html=True)
+                        st.code(p["text"],language=None); st.caption(f"{len(p['text'])}字")
+
+# フッター
 st.divider()
-st.markdown("""
-<div style="text-align:center; color:#bbb; font-size:11px; letter-spacing:2px; padding: 8px 0;">
-  COMIC ROOM X POST GENERATOR　©2025 株式会社コミックルーム
-</div>
-""", unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;color:#bbb;font-size:11px;letter-spacing:2px">COMIC ROOM X POST GENERATOR　©2025 株式会社コミックルーム</div>', unsafe_allow_html=True)
